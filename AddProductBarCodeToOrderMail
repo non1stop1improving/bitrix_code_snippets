@@ -1,0 +1,57 @@
+// задача: скорректировать почтовое сообщение, возникающее при срабатывании события SALE_NEW_ORDER (создание нового заказа)
+// 1) скорректировать поле ORDER_LIST - ранее строка с товаром представляла собой конструкцию типа 
+// "#PRODUCT_NAME# - #PRODUCT_AMOUNT# x #PRODUCT_PRICE#"
+// необходимо превратить ее в конструкцию типа 
+// "Артикул: #PRODUCT_BARCODE# - #PRODUCT_NAME# - #PRODUCT_AMOUNT# x #PRODUCT_PRICE#"
+// 2) в почтовое сообщение необходимо добавить данные о заказчике, котороые добавляются в профиль покупателя: Контактное лицо, Телефон, Email, Организация, Комментарий к заказу, Адрес доставки
+
+AddEventHandler("main", "OnBeforeEventAdd", "AddProductsBarCode");
+function AddProductsBarCode(&$event, &$lid, &$arFields) { // обработчик события возникает перед добавлением письма в таблицу b_event
+	if ($event == "SALE_NEW_ORDER") { // ограничиваем выполнение только событием нового заказа 
+		$rs = CSaleBasket::GetList( // по айди заказа собираем корзину товаров
+			array(),
+			array("ORDER_ID" => $arFields["ORDER_ID"]),
+			false,
+			false,
+			array("PRICE", "NAME", "QUANTITY", "PRODUCT_ID")
+		);
+		$newOrderList = "";
+		while ($arProduct = $rs->Fetch()) {
+			$rs_barcode = CIBlockElement::GetList( // артикул - это свойство товара, поэтому нужно обращение к бд
+				array(),
+				["ID" => $arProduct["PRODUCT_ID"]],
+				false,
+				false,
+				["PROPERTY_CML2_TRAITS"]
+			);
+			$curBarCode = "";
+			while ($arBarCode = $rs_barcode->Fetch()) {
+				if (strpos($arBarCode["PROPERTY_CML2_TRAITS_VALUE"], "КА-") === false) // свойство "Реквизиты" множественное, извлекаем только артикул
+					continue;
+				$curBarCode = $arBarCode["PROPERTY_CML2_TRAITS_VALUE"];
+			}			
+			$curString = "Артикул: " . $curBarCode . " - " . $arProduct["NAME"] . " - " . $arProduct["QUANTITY"] . " шт. х " . number_format($arProduct["PRICE"], 2, ",", " ") . " руб. <br>"; // формируем новую строку с артикулом
+			$newOrderList .= $curString;
+		}
+		$arFields["ORDER_LIST"] = $newOrderList; // обновляем значение ORDER_LIST для почтового шаблона
+		global $USER;
+		$rsProfile = CSaleOrderUserProps::GetList([], ["USER_ID" => $USER->GetID()], false, false, ["ID"]); // получаем айди профиль покупателя по его айди
+		if ($arProfile = $rsProfile->Fetch()) {
+			$userProfileID = $arProfile["ID"];
+		}
+		$rsProfileProps = CSaleOrderUserPropsValue::GetList([], ["USER_PROPS_ID" => $userProfileID], false, false, ["*"]); // получаем свойства профиля по айди
+		while ($arProfileProps = $rsProfileProps->Fetch()) {
+			$arFields[$arProfileProps["CODE"]] = $arProfileProps["VALUE"]; // добавляем свойства профиля заказчика в массив данных, которые уйдут почтовому событию
+		}
+		$rs_order = CSaleOrder::GetList( // получаем данные о самом заказе (чтобы извлечь комментарий к заказу)
+			['DATE_INSERT' => 'DESC'], // сортировка по дате размещения
+			["USER_ID" => $USER->GetID()], // текущий пользователь
+			false,
+			['nTopCount' => '1'], // последний заказ
+			["USER_DESCRIPTION"] // комментарий к заказу
+		);
+		if ($arOrder = $rs_order->Fetch()) {
+			$arFields["ORDER_COMMENTARY"] = $arOrder["USER_DESCRIPTION"];
+		}
+	}
+}
